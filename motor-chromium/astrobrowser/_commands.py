@@ -98,7 +98,7 @@ def _out(line=""):
 
 
 def fail(msg, code=1):
-    sys.stderr.write(f"clearcote: {msg}\n")
+    sys.stderr.write(f"astrobrowser: {msg}\n")
     sys.stderr.flush()
     raise CliExit(code)
 
@@ -692,7 +692,7 @@ def _run(argv):
         return _cloud(argv[1:])
     known = ("info", "doctor", "install", "update", "clear-cache", "login", "logout", "serve", "detect")
     if argv[0] not in known:
-        fail(f"unknown command '{argv[0]}'. Run `clearcote --help`.", 2)
+        fail(f"unknown command '{argv[0]}'. Run `astrobrowser --help`.", 2)
 
     parser = _parser()
 

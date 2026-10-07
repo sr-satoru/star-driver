@@ -3,14 +3,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "clearcote"
+name = "astrobrowser"
 version = "0.34.0"
-description = "Playwright drop-in for the Clearcote anti-fingerprint Chromium build. launch() returns a standard Playwright Browser backed by the verified Clearcote binary, which is auto-downloaded and SHA-256 checked."
+description = "Playwright drop-in for the AstroBrowser anti-fingerprint Chromium build (Star Multlogin). launch() returns a standard Playwright Browser backed by the verified Star Multlogin Chromium binary."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "BSD-3-Clause" }
 keywords = [
-    "clearcote",
+    "astrobrowser",
+    "star-chromium",
     "playwright",
     "chromium",
     "anti-detect",
@@ -27,25 +28,24 @@ dependencies = [
 ]
 
 [project.scripts]
-clearcote = "clearcote._commands:_console_main"
-astrobrowser = "clearcote._commands:_console_main"
-star-chromium = "clearcote._commands:_console_main"
-clearcote-agent = "clearcote.cli:main"
-clearcote-serve = "clearcote._serve:_cli_main"
+astrobrowser = "astrobrowser._commands:_console_main"
+star-chromium = "astrobrowser._commands:_console_main"
+astrobrowser-agent = "astrobrowser.cli:main"
+astrobrowser-serve = "astrobrowser._serve:_cli_main"
 
 [project.optional-dependencies]
 test = ["pytest>=7", "pytest-asyncio>=0.23"]
 
 [project.urls]
-Homepage = "https://github.com/clearcotelabs/clearcote-browser"
-Repository = "https://github.com/clearcotelabs/clearcote-browser"
-Issues = "https://github.com/clearcotelabs/clearcote-browser/issues"
+Homepage = "https://github.com/sr-satoru/navegador"
+Repository = "https://github.com/sr-satoru/navegador"
+Issues = "https://github.com/sr-satoru/navegador/issues"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
-packages = ["clearcote"]
+packages = ["astrobrowser"]
 
 [tool.hatch.build.targets.sdist]
-include = ["clearcote", "README.md", "LICENSE"]
+include = ["astrobrowser", "README.md", "LICENSE"]
