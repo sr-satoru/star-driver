@@ -1,0 +1,181 @@
+name: Build & Release Star Driver
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Criar GitHub Release oficial com os artefatos?'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------
+  # 1. Constrói a SDK Python (Wheel .whl e Código-Fonte .tar.gz)
+  # -------------------------------------------------------------
+  build-wheel:
+    name: Build Python SDK (Wheel & sdist)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: motor-fire
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tool
+        run: |
+          python -m pip install --upgrade pip
+          pip install build poetry-core
+
+      - name: Build Wheel and sdist
+        run: |
+          python -m build
+
+      - name: Upload Python SDK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdk
+          path: motor-fire/dist/*
+          if-no-files-found: error
+
+  # -------------------------------------------------------------
+  # 1B. Constrói a SDK Python Chromium (Wheel .whl e Código-Fonte .tar.gz)
+  # -------------------------------------------------------------
+  build-chromium-wheel:
+    name: Build Chromium SDK (Wheel & sdist)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: motor-chromium
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tool
+        run: |
+          python -m pip install --upgrade pip
+          pip install build hatchling
+
+      - name: Build Wheel and sdist
+        run: |
+          python -m build
+
+      - name: Upload Chromium SDK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-sdk
+          path: motor-chromium/dist/*
+          if-no-files-found: error
+
+  # -------------------------------------------------------------
+  # 2. Constrói os Binários Standalone Nativos (Windows, Linux, macOS)
+  # -------------------------------------------------------------
+  build-binaries:
+    name: Build Standalone Executable (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: motor-fire
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+            output_name: stardriver-windows-x64.exe
+            built_binary: dist/stardriver.exe
+            sep: ";"
+          - os: ubuntu-latest
+            target: linux-x64
+            output_name: stardriver-linux-x64
+            built_binary: dist/stardriver
+            sep: ":"
+          - os: macos-latest
+            target: macos-arm64
+            output_name: stardriver-macos-arm64
+            built_binary: dist/stardriver
+            sep: ":"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies & PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller poetry-core
+          pip install -e .
+
+      - name: Build standalone executable with PyInstaller (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --name=stardriver --onefile --clean --add-data="astrofox${{ matrix.sep }}astrofox" --hidden-import=astrofox --hidden-import=playwright --hidden-import=fpgen --icon="astrofox/gui/assets/icon.ico" entrypoint.py
+          Move-Item -Path dist/stardriver.exe -Destination dist/${{ matrix.output_name }}
+
+      - name: Build standalone executable with PyInstaller (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          pyinstaller --name=stardriver --onefile --clean --add-data="astrofox${{ matrix.sep }}astrofox" --hidden-import=astrofox --hidden-import=playwright --hidden-import=fpgen --icon="astrofox/gui/assets/icon.ico" entrypoint.py
+          mv dist/stardriver dist/${{ matrix.output_name }}
+          chmod +x dist/${{ matrix.output_name }}
+
+      - name: Upload ${{ matrix.target }} Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: motor-fire/dist/${{ matrix.output_name }}
+          if-no-files-found: error
+
+  # -------------------------------------------------------------
+  # 3. Publica todos os arquivos no GitHub Releases
+  # -------------------------------------------------------------
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-wheel, build-chromium-wheel, build-binaries]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Display downloaded files
+        run: |
+          ls -lh release-artifacts/
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

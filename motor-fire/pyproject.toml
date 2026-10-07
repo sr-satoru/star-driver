@@ -1,0 +1,57 @@
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "star-driver"
+version = "2.1.0"
+description = "Star Driver - High performance anti-detect browser driver & Playwright interface for Star Multlogin"
+authors = ["Star Multlogin Team"]
+license = "MIT"
+readme = "README.md"
+keywords = [
+    "star-driver",
+    "anti-detect",
+    "fingerprint",
+    "browser",
+    "scraping",
+    "firefox",
+    "playwright",
+]
+classifiers = [
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+packages = [{include = "astrofox"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+rich-click = "*"
+rich = "*"
+requests = "*"
+orjson = "*"
+fpgen = "^1.3.0"
+# Keep a ceiling. 1.61 added Juggler params the protocol schema had to learn
+playwright = "<1.63"
+pyyaml = "*"
+platformdirs = "*"
+numpy = "*"
+ua_parser = "*"
+typing_extensions = "*"
+screeninfo = "*"
+language-tags = "*"
+pysocks = "*"
+inquirer = "*"
+maxminddb = {version = "*", optional = true}
+PySide6 = {version = "*", optional = true}
+
+[tool.poetry.extras]
+geoip = ["maxminddb"]
+gui = ["PySide6"]
+
+[tool.poetry.scripts]
+astrofox = "astrofox.__main__:cli"
+star-driver = "astrofox.__main__:cli"
+stardriver = "astrofox.__main__:cli"
+camoufox = "astrofox.__main__:cli"

@@ -1,0 +1,352 @@
+"""Launch behaviour (mirrors sdk/node/test/parity-launch.test.ts): GPU defaults,
+new engine-switch gating, pass-through, voices, third-party cookies, transparent proxy, release
+channel, serve as root."""
+import os
+import sys
+import warnings
+
+import pytest
+
+import clearcote
+from clearcote._fingerprint import FINGERPRINT_KEYS, fingerprint_args, is_fingerprint_passthrough
+from clearcote._launchopts import (
+    DEFAULT_IGNORED_ARGS,
+    GATED_ENGINE_SWITCHES,
+    _SWITCH_CACHE,
+    engine_extras_args,
+    gate_engine_switches,
+    gpu_blocklist_args,
+    serve_needs_no_sandbox,
+)
+from clearcote.download import pro_download_url, resolve_release_channel
+
+
+@pytest.fixture(autouse=True)
+def _clear_switch_cache():
+    _SWITCH_CACHE.clear()
+    yield
+    _SWITCH_CACHE.clear()
+
+
+def fake_engine(tmp_path, switches):
+    """A fake engine binary containing exactly these NUL-delimited switch literals."""
+    body = b"MZ\0padding\0" + b"".join(b"\0" + s.encode("latin-1") + b"\0" for s in switches) + b"\0end"
+    exe = tmp_path / ("chrome.exe" if sys.platform == "win32" else "chrome")
+    exe.write_bytes(body)
+    if sys.platform == "win32":
+        (tmp_path / "chrome.dll").write_bytes(body)
+    return str(exe)
+
+
+# -- GPU launch defaults (#1 + #2) -------------------------------------------------------------
+
+def test_strips_playwright_automation_and_swiftshader_defaults():
+    assert list(DEFAULT_IGNORED_ARGS) == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars"]
+
+
+def test_ignore_gpu_blocklist_when_headed_on_any_os():
+    assert gpu_blocklist_args(True, "linux") == ["--ignore-gpu-blocklist"]
+    assert gpu_blocklist_args(True, "win32") == ["--ignore-gpu-blocklist"]
+
+
+def test_ignore_gpu_blocklist_on_windows_even_headless():
+    assert gpu_blocklist_args(False, "win32") == ["--ignore-gpu-blocklist"]
+
+
+def test_nothing_for_headless_linux():
+    assert gpu_blocklist_args(False, "linux") == []
+
+
+def test_never_duplicates_caller_flag():
+    assert gpu_blocklist_args(True, "linux", ["--ignore-gpu-blocklist"]) == []
+
+
+# -- gate_engine_switches -----------------------------------------------------------------------
+
+ALL = list(GATED_ENGINE_SWITCHES)
+
+
+def test_gate_keeps_every_switch_on_new_engine(tmp_path):
+    exe = fake_engine(tmp_path, [s[2:] for s in ALL])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        args, notes = gate_engine_switches(exe, ["--foo"] + ALL, quiet=False)
+    assert args == ["--foo"] + ALL
+    assert notes == []
+    assert not caught
+
+
+def test_gate_drops_each_unsupported_switch_with_warning(tmp_path):
+    exe = fake_engine(tmp_path, ["proxy-auth"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        args, notes = gate_engine_switches(exe, [
+            "--foo=1", "--allow-third-party-cookies", "--transparent-proxy",
+            "--disable-fingerprint-voices", "--fingerprint-passthrough"], quiet=False)
+    assert args == ["--foo=1"]
+    assert len(notes) == 4
+    assert len(caught) == 4
+    assert "allow_third_party_cookies=True needs engine 152 r22 or newer; this engine ignores it, so it was not applied." in "\n".join(notes)
+
+
+def test_gate_silent_under_quiet_but_reports(tmp_path):
+    exe = fake_engine(tmp_path, [])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        args, notes = gate_engine_switches(exe, ["--transparent-proxy"], quiet=True)
+    assert args == []
+    assert len(notes) == 1
+    assert not caught
+
+
+def test_gate_does_not_mistake_longer_literal(tmp_path):
+    exe = fake_engine(tmp_path, ["allow-third-party-cookies-extra", "xtransparent-proxy"])
+    args, _ = gate_engine_switches(exe, ["--allow-third-party-cookies", "--transparent-proxy"], quiet=True)
+    assert args == []
+
+
+# -- engine_extras_args -------------------------------------------------------------------------
+
+def test_allow_third_party_cookies_switch():
+    assert engine_extras_args(allow_third_party_cookies=True) == ["--allow-third-party-cookies"]
+    assert engine_extras_args(allow_third_party_cookies=False) == []
+
+
+def test_transparent_proxy_needs_a_proxy():
+    assert engine_extras_args(transparent_proxy=True, proxy={"server": "http://p:8080"}) == ["--transparent-proxy"]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert engine_extras_args(transparent_proxy=True, proxy=None) == []
+    assert any("no effect without a proxy" in str(w.message) for w in caught)
+
+
+# -- pass-through ---------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("v", ["off", "OFF", " off ", "Off", False])
+def test_recognises_passthrough(v):
+    assert is_fingerprint_passthrough(v) is True
+
+
+# Only "off" / False: 0, "0", "no", "false", "disable(d)" are ordinary seeds, so an identity keyed by
+# such a value never silently loses its persona.
+@pytest.mark.parametrize("v", ["seed-1", "offline", "0x1", "", 1, 0, "0", "no", "false", "disable",
+                               "disabled", None, True])
+def test_not_passthrough(v):
+    assert is_fingerprint_passthrough(v) is False
+
+
+def test_passthrough_emits_no_persona_switches():
+    args = fingerprint_args({"fingerprint": "off", "platform": "windows", "brand": "Edge",
+                             "gpu_vendor": "X", "light_stealth": True})
+    assert args == ["--fingerprint-passthrough"]
+    assert not any(a.startswith("--fingerprint=") for a in args)
+
+
+def test_passthrough_keeps_only_explicit_locale_network():
+    assert fingerprint_args({"fingerprint": "off", "timezone": "Europe/Berlin",
+                             "accept_language": "de-DE,de;q=0.9", "webrtc_ip": "1.2.3.4"}) == [
+        "--fingerprint-passthrough", "--timezone=Europe/Berlin", "--accept-lang=de-DE,de",
+        "--lang=de", "--webrtc-ip=1.2.3.4"]
+
+
+def test_passthrough_adds_no_coherence_defaults():
+    joined = " ".join(fingerprint_args({"fingerprint": "off"}))
+    for s in ("accept-lang", "timezone", "fingerprint-platform", "fingerprint-brand"):
+        assert s not in joined
+
+
+# -- fingerprint_voices -------------------------------------------------------------------------
+
+def test_fingerprint_voices_is_a_fingerprint_key():
+    assert "fingerprint_voices" in FINGERPRINT_KEYS
+
+
+def test_fingerprint_voices_false_emits_switch():
+    assert "--disable-fingerprint-voices" in fingerprint_args({"fingerprint": "s", "fingerprint_voices": False})
+    assert "--disable-fingerprint-voices" not in fingerprint_args({"fingerprint": "s", "fingerprint_voices": True})
+    assert "--disable-fingerprint-voices" not in fingerprint_args({"fingerprint": "s"})
+
+
+# -- release channel (#5) -----------------------------------------------------------------------
+
+def test_release_channel_resolution():
+    assert resolve_release_channel(None, {}) == "stable"
+    assert resolve_release_channel(None, {"CLEARCOTE_RELEASE_CHANNEL": "preview"}) == "preview"
+    assert resolve_release_channel("stable", {"CLEARCOTE_RELEASE_CHANNEL": "preview"}) == "stable"
+    assert resolve_release_channel(" Preview ", {}) == "preview"
+    with pytest.raises(ValueError, match="Unknown release channel 'beta'"):
+        resolve_release_channel("beta", {})
+
+
+def test_pro_download_url_channel_only_for_preview():
+    assert pro_download_url("https://x.test/", "linux") == "https://x.test/api/v1/download/pro?platform=linux"
+    assert pro_download_url("https://x.test", "windows", "152", "stable") == \
+        "https://x.test/api/v1/download/pro?platform=windows&version=152"
+    assert pro_download_url("https://x.test", "windows", "152.0.7977.82-r21", "preview") == \
+        "https://x.test/api/v1/download/pro?platform=windows&version=152.0.7977.82-r21&channel=preview"
+
+
+def test_pro_ensure_binary_sends_channel(monkeypatch):
+    import json
+    import urllib.request
+
+    from clearcote import download as _unused  # noqa: F401
+    dl = sys.modules["clearcote.download"]
+    seen = []
+
+    class Resp:
+        def __init__(self, body):
+            self._b = body
+
+        def read(self):
+            return self._b
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.full_url)
+        return Resp(json.dumps({"tag": "pro-x", "url": None}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(RuntimeError, match="not currently available"):
+        dl.pro_ensure_binary("k", api_base="https://x.test", release_channel="preview")
+    with pytest.raises(RuntimeError):
+        dl.pro_ensure_binary("k", api_base="https://x.test")
+    assert seen == ["https://x.test/api/v1/download/pro?platform=linux&channel=preview",
+                    "https://x.test/api/v1/download/pro?platform=linux"]
+
+
+# -- serve as root (#9) -------------------------------------------------------------------------
+
+def test_serve_needs_no_sandbox():
+    assert serve_needs_no_sandbox("linux", 0, []) is True
+    assert serve_needs_no_sandbox("linux", 1000, []) is False
+    assert serve_needs_no_sandbox("linux", 0, ["--no-sandbox"]) is False
+    assert serve_needs_no_sandbox("win32", None, []) is False
+
+
+# -- end to end through _prepare (the real arg assembly both launch paths and serve use) ----------
+
+@pytest.fixture
+def prepared(monkeypatch, tmp_path):
+    def run(switches, **kwargs):
+        exe = fake_engine(tmp_path, switches)
+        monkeypatch.setattr(clearcote, "_resolve_binary", lambda *a, **k: exe)
+        monkeypatch.setattr(clearcote, "_guard", lambda exe: None)
+        kwargs.setdefault("quiet", True)
+        return clearcote._prepare(dict(kwargs))
+    return run
+
+
+NEW = [s[2:] for s in ALL] + ["proxy-auth"]
+
+
+def test_prepare_defaults_ignore_args_and_gpu_blocklist(prepared):
+    _exe, args, pw, *_ = prepared(NEW, headless=True)
+    assert pw["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars"]
+    assert ("--ignore-gpu-blocklist" in args) == (sys.platform == "win32")
+    _exe, args, pw, *_ = prepared(NEW, headless=False)
+    assert "--ignore-gpu-blocklist" in args
+
+
+def test_prepare_callers_ignore_default_args_win(prepared):
+    _exe, _args, pw, *_ = prepared(NEW, ignore_default_args=["--enable-automation"])
+    assert pw["ignore_default_args"] == ["--enable-automation"]
+
+
+def test_prepare_serve_headed_flag(prepared, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    _exe, args, *_ = prepared(NEW, _cc_headed=True)
+    assert "--ignore-gpu-blocklist" in args
+    _exe, args, *_ = prepared(NEW, _cc_headed=False)
+    assert "--ignore-gpu-blocklist" not in args
+
+
+def test_prepare_passthrough_and_extras_on_new_engine(prepared):
+    _exe, args, pw, *_ = prepared(NEW, fingerprint="off", platform="macos", fingerprint_voices=False,
+                                  allow_third_party_cookies=True, transparent_proxy=True,
+                                  proxy={"server": "http://127.0.0.1:3128"}, license_through_proxy=True,
+                                  release_channel="preview")
+    assert "--fingerprint-passthrough" in args
+    assert not any(a.startswith("--fingerprint=") or a.startswith("--fingerprint-platform") for a in args)
+    assert "--allow-third-party-cookies" in args and "--transparent-proxy" in args
+    for leaked in ("allow_third_party_cookies", "transparent_proxy", "license_through_proxy", "release_channel"):
+        assert leaked not in pw
+
+
+def test_prepare_old_engine_drops_new_switches(prepared):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _exe, args, *_ = prepared(["proxy-auth"], fingerprint="off", fingerprint_voices=False,
+                                  allow_third_party_cookies=True, quiet=False)
+    assert not any(a in args for a in ALL)
+    assert sum("needs engine 152 r22" in str(w.message) for w in caught) == 2  # passthrough + cookies
+
+
+def test_prepare_passthrough_skips_auto_profile(prepared, monkeypatch):
+    called = []
+    monkeypatch.setattr(clearcote, "_apply_auto_profile", lambda *a, **k: called.append(1))
+    prepared(NEW, fingerprint="off", profile="auto")
+    assert called == []
+
+
+def test_launch_persistent_context_default_ignore_args(monkeypatch):
+    captured = {}
+
+    class Ctx:
+        pages = []
+
+        def on(self, *a):
+            pass
+
+    class Chromium:
+        def launch_persistent_context(self, udd, **kw):
+            captured.update(kw)
+            return Ctx()
+
+    class PW:
+        chromium = Chromium()
+
+    monkeypatch.setattr(clearcote, "_playwright", lambda: PW())
+    monkeypatch.setattr(clearcote, "install_humanize_on_context", lambda *a, **k: None)
+    monkeypatch.setattr(clearcote, "_prepare",
+                        lambda kw: ("chrome", [], dict(kw), False, False, None))
+    monkeypatch.setattr(clearcote, "apply_headless_geometry", lambda *a, **k: None)
+    clearcote.launch_persistent_context("udd", quiet=True)
+    assert captured["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars"]
+
+
+async def test_async_launch_persistent_context_default_ignore_args(monkeypatch):
+    from clearcote import async_api
+    seen = {}
+
+    def fake_prepare(kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(async_api, "_prepare", fake_prepare)
+    with pytest.raises(RuntimeError, match="stop here"):
+        await async_api.launch_persistent_context("udd", quiet=True)
+    assert seen["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars"]
+
+
+def test_release_channel_reaches_every_pro_download_path(monkeypatch):
+    dl = sys.modules["clearcote.download"]
+    seen = []
+    monkeypatch.delenv("CLEARCOTE_BINARY", raising=False)
+    monkeypatch.delenv("CLEARCOTE_BROWSER_VERSION", raising=False)
+    monkeypatch.setattr(dl, "pro_ensure_binary",
+                        lambda key, **kw: seen.append((kw.get("version"), kw.get("release_channel"))) or "exe")
+    monkeypatch.setattr(dl, "resolve_version", lambda sel, has_license=False, quiet=False: ("pro", "152"))
+    pro = ("cc_lic_x", None)
+    clearcote._resolve_binary(None, pro=pro, release_channel="preview")                   # pinned PRO
+    clearcote._resolve_binary(None, pro=pro, version="r22", release_channel="preview")    # revision pin
+    clearcote._resolve_binary(None, pro=pro, version="152", release_channel="preview")    # catalog pin
+    assert seen == [(None, "preview"), ("r22", "preview"), ("152", "preview")]
+    with pytest.raises(ValueError, match="Unknown release channel"):
+        clearcote._resolve_binary(None, pro=pro, version="152", release_channel="beta")
